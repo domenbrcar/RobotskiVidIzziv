@@ -1,0 +1,16 @@
+data/
+report/
+output/
+outputs/
+output_test*/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.bak
+*.bak_*
+patch_*.py
+*_patch.py
+prompt.clear
+.DS_Store
+.vscode/
