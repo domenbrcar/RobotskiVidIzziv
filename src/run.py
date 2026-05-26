@@ -69,23 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     for index, video in enumerate(videos, start=1):
         print(f"[{index}/{len(videos)}] Obdelujem: {video}", flush=True)
         try:
-            result = process_video(video, args.output, DEFAULT_CONFIG)
-            row = {
-                "patient_id": result.get("patient_id", ""),
-                "video_id": result.get("video_id", ""),
-                "target_locked": result.get("target_locked", 0),
-                "target_reason": result.get("target_reason", ""),
-                "max_peg_count": result.get("max_peg_count", 0),
-                "final_peg_count": result.get("final_peg_count", 0),
-                "reached_9": result.get("reached_9", 0),
-                "target_patient_side": result.get("target_patient_side", ""),
-                "hand_mean_confidence": result.get("hand_mean_confidence", ""),
-            }
-            print(
-                f"  -> mreža={row['target_locked']} max={row['max_peg_count']} final={row['final_peg_count']} "
-                f"reason={row['target_reason']}",
-                flush=True,
-            )
+            process_video(video, args.output, DEFAULT_CONFIG)
         except Exception as exc:
             print(f"  -> NAPAKA: {exc}", flush=True)
     print(f"Končano. Izhodi so v: {args.output}")
