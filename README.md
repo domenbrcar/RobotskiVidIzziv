@@ -1,7 +1,3 @@
-# Robotski vid: analiza 9HPT videoposnetkov
-
-Projekt obdela videoposnetke testa Nine Hole Peg Test. Program samodejno izbere ciljno mrežo, sledi roki, zazna zatiče in shrani pregledni GUI video, grafe ter trajektorije.
-
 ## Docker build
 
 ```bash
@@ -45,26 +41,49 @@ docker run --rm -it --shm-size=16g `
 
 ## Zagon na Linux strežniku
 
+Na Linux strežniku so podatki na disku:
+
+```text
+/media/FastDataMama/data_rv_26
+```
+
+Zato jih v Docker priklopimo kot `/data`.
+
+En video:
+
 ```bash
 docker run --rm -it \
   --shm-size=16g \
   -v "$(pwd):/workspace" \
+  -v /media/FastDataMama/data_rv_26:/data:ro \
   -w /workspace \
   rv-9hpt python src/run.py \
-  -folder /workspace/data \
+  -video /data/patient_001/patient_001camP_0_20241121_10_21_17.mp4 \
   -output /workspace/output/final
 ```
 
-## Izhod
+En pacient:
 
-Za vsak video nastane samo:
+```bash
+docker run --rm -it \
+  --shm-size=16g \
+  -v "$(pwd):/workspace" \
+  -v /media/FastDataMama/data_rv_26:/data:ro \
+  -w /workspace \
+  rv-9hpt python src/run.py \
+  -patient /data/patient_003 \
+  -output /workspace/output/final
+```
 
-```text
-output/<run_name>/patient_XXX/<video_id>/
-  gui_video/
-    gui_<video_id>.mp4
-  graphs/
-    *.png
-  trajectories/
-    *.png
+Vsi videi:
+
+```bash
+docker run --rm -it \
+  --shm-size=16g \
+  -v "$(pwd):/workspace" \
+  -v /media/FastDataMama/data_rv_26:/data:ro \
+  -w /workspace \
+  rv-9hpt python src/run.py \
+  -folder /data \
+  -output /workspace/output/final
 ```
