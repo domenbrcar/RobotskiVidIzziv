@@ -1,8 +1,9 @@
 data/
-report/
 output/
 outputs/
 output_test*/
+report/
+tests/
 __pycache__/
 .pytest_cache/
 *.pyc

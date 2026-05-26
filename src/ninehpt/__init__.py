@@ -1,3 +1,3 @@
-"""Nine Hole Peg Test video analysis package."""
+# Paket za video analizo testa Nine Hole Peg Test.
 
 __all__ = []

@@ -1,4 +1,4 @@
-"""Data structures used across the 9HPT pipeline."""
+# Podatkovne strukture, uporabljene skozi celotno 9HPT obdelavo.
 
 from __future__ import annotations
 
@@ -90,6 +90,7 @@ class HandSelectionState:
     candidate_frames: int = 0
     last_good_hand: DetectedHand | None = None
     last_good_frame: int = -10_000
+    locked_away_start_frame: int = -10_000
     confidence: float = 0.0
     selected_hand_source: str = ""
     rejected_switch_reason: str = ""

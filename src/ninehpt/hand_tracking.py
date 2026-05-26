@@ -1,4 +1,4 @@
-"""Stable patient-hand tracking on top of MediaPipe detections."""
+# Stabilno sledenje pacientovi roki na osnovi zaznav MediaPipe.
 
 from __future__ import annotations
 
@@ -151,18 +151,35 @@ def _orientation_score(hand: DetectedHand, target_center: np.ndarray, spacing: f
     return float(np.clip(0.45 * directed + 0.40 * close + 0.15 * pinch_shape, 0.0, 1.0))
 
 
+def _hand_work_distance(hand: DetectedHand, target_center: np.ndarray) -> float:
+    points = np.stack([hand.palm_center, hand.pinch_center, hand.thumb_tip, hand.index_tip], axis=0)
+    return float(np.min(np.linalg.norm(points - target_center, axis=1)))
+
+
+def _hand_identity_distance(current: DetectedHand, previous: DetectedHand) -> float:
+    stable_indices = [0, 5, 9, 13, 17]
+    current_points = np.asarray(current.landmarks_px[stable_indices], dtype=np.float32)
+    previous_points = np.asarray(previous.landmarks_px[stable_indices], dtype=np.float32)
+    stable_distance = float(np.median(np.linalg.norm(current_points - previous_points, axis=1)))
+    palm_distance = float(np.linalg.norm(current.palm_center - previous.palm_center))
+    return 0.75 * stable_distance + 0.25 * palm_distance
+
+
 def _hand_score(hand: DetectedHand, target_centers: np.ndarray | None, previous: DetectedHand | None, frame_shape: tuple[int, ...] | None, config: dict) -> float:
     target_center, spacing = _grid_center_and_scale(target_centers, frame_shape)
-    palm_distance = float(np.linalg.norm(hand.palm_center - target_center))
-    pinch_distance = float(np.linalg.norm(hand.pinch_center - target_center))
-    distance_score = math.exp(-min(palm_distance, pinch_distance) / max(4.5 * spacing, 1.0))
+    distance_score = math.exp(-_hand_work_distance(hand, target_center) / max(3.9 * spacing, 1.0))
     orientation = _orientation_score(hand, target_center, spacing)
     continuity = 0.0
     if previous is not None:
-        jump = float(np.linalg.norm(hand.palm_center - previous.palm_center))
+        jump = _hand_identity_distance(hand, previous)
         continuity = math.exp(-jump / max(2.5 * spacing, 1.0))
-    score = 0.34 * float(hand.confidence) + 0.34 * distance_score + 0.20 * orientation + 0.12 * continuity
+    score = 0.22 * float(hand.confidence) + 0.46 * distance_score + 0.16 * orientation + 0.16 * continuity
     return float(np.clip(score, 0.0, 1.0))
+
+
+def _hand_in_locked_work_zone(hand: DetectedHand, target_center: np.ndarray, spacing: float, config: dict) -> bool:
+    radius = max(2.5 * spacing, float(config.get("locked_hand_work_zone_spacing_factor", 5.8)) * spacing)
+    return _hand_work_distance(hand, target_center) <= radius
 
 
 def _hold_previous(state: HandSelectionState, frame_index: int, fps: float, config: dict, reason: str) -> tuple[DetectedHand | None, HandSelectionState]:
@@ -181,6 +198,40 @@ def _hold_previous(state: HandSelectionState, frame_index: int, fps: float, conf
     return None, state
 
 
+def _hold_locked_previous(state: HandSelectionState, frame_index: int, fps: float, config: dict, reason: str) -> tuple[DetectedHand | None, HandSelectionState]:
+    hold_frames = int(round(float(config.get("locked_hand_reselect_seconds", config["hand_hold_seconds"])) * max(fps, 1.0)))
+    if state.last_good_hand is not None and frame_index - state.last_good_frame <= hold_frames:
+        state.selected_hand = state.last_good_hand
+        state.last_frame_index = frame_index
+        state.confidence = max(0.0, state.confidence * 0.96)
+        state.selected_hand_source = "locked_last_good"
+        state.rejected_switch_reason = reason
+        return state.selected_hand, state
+    return _hold_previous(state, frame_index, fps, config, reason)
+
+
+def _select_hand(
+    state: HandSelectionState,
+    hand: DetectedHand,
+    frame_index: int,
+    source: str,
+    reason: str = "",
+    clear_candidate: bool = True,
+) -> tuple[DetectedHand, HandSelectionState]:
+    state.selected_hand = hand
+    state.last_good_hand = hand
+    state.last_good_frame = frame_index
+    state.last_frame_index = frame_index
+    state.confidence = hand.score
+    state.selected_hand_source = source
+    state.rejected_switch_reason = reason
+    if clear_candidate:
+        state.candidate_hand = None
+        state.candidate_frames = 0
+    state.locked_away_start_frame = -10_000
+    return hand, state
+
+
 def select_patient_hand(
     detections: list[DetectedHand],
     state: HandSelectionState,
@@ -189,9 +240,12 @@ def select_patient_hand(
     target_centers: np.ndarray | None,
     frame_shape: tuple[int, ...] | None,
     config: dict,
+    lock_switches: bool = False,
 ) -> tuple[DetectedHand | None, HandSelectionState]:
     """Select one patient hand with hysteresis and short dropout retention."""
     if not detections:
+        if lock_switches:
+            return _hold_locked_previous(state, frame_index, fps, config, "zaklenjena_roka_brez_zaznave")
         return _hold_previous(state, frame_index, fps, config, "ni_zaznane_roke")
 
     for hand in detections:
@@ -200,22 +254,17 @@ def select_patient_hand(
     best = detections[0]
 
     target_center, spacing = _grid_center_and_scale(target_centers, frame_shape)
-    max_jump = max(45.0, config["hand_max_jump_ratio"] * (math.hypot(frame_shape[1], frame_shape[0]) if frame_shape else 1000.0))
+    frame_jump = config["hand_max_jump_ratio"] * (math.hypot(frame_shape[1], frame_shape[0]) if frame_shape else 1000.0)
+    identity_jump = float(config.get("hand_identity_max_spacing_factor", 3.4)) * spacing
+    max_jump = max(45.0, min(frame_jump, identity_jump))
     switch_margin = float(config["hand_switch_margin"])
     confirm_frames = int(config["hand_switch_confirm_frames"])
 
     previous = state.last_good_hand
     if previous is None:
-        state.selected_hand = best
-        state.last_good_hand = best
-        state.last_good_frame = frame_index
-        state.last_frame_index = frame_index
-        state.confidence = best.score
-        state.selected_hand_source = "initial_detection"
-        state.rejected_switch_reason = ""
-        return best, state
+        return _select_hand(state, best, frame_index, "initial_detection")
 
-    distances_to_previous = [float(np.linalg.norm(hand.palm_center - previous.palm_center)) for hand in detections]
+    distances_to_previous = [_hand_identity_distance(hand, previous) for hand in detections]
     nearest_index = int(np.argmin(distances_to_previous))
     nearest = detections[nearest_index]
     nearest_distance = distances_to_previous[nearest_index]
@@ -223,22 +272,67 @@ def select_patient_hand(
     previous_score_estimate = _hand_score(previous, target_centers, previous, frame_shape, config)
 
     previous_visible = nearest_distance <= max_jump * 1.15
-    best_is_previous = nearest is best or float(np.linalg.norm(best.palm_center - previous.palm_center)) <= max_jump
+    best_is_previous = nearest is best or _hand_identity_distance(best, previous) <= max_jump
     hands_overlap = len(detections) > 1 and abs(detections[0].score - detections[1].score) < 0.08
 
-    if previous_visible and (best_is_previous or hands_overlap or best.score < nearest_score + switch_margin):
-        state.selected_hand = nearest
-        state.last_good_hand = nearest
-        state.last_good_frame = frame_index
-        state.last_frame_index = frame_index
-        state.confidence = nearest.score
-        state.candidate_hand = None
-        state.candidate_frames = 0
-        state.selected_hand_source = "continuous_detection"
-        state.rejected_switch_reason = "ohranjena_kontinuiteta"
-        return nearest, state
+    if lock_switches:
+        reselect_frames = int(round(float(config.get("locked_hand_reselect_seconds", config["hand_hold_seconds"])) * max(fps, 1.0)))
+        closest_to_grid = min(detections, key=lambda hand: _hand_work_distance(hand, target_center))
+        closest_grid_distance = _hand_work_distance(closest_to_grid, target_center)
+        closest_near_work = _hand_in_locked_work_zone(closest_to_grid, target_center, spacing, config)
+        if previous_visible:
+            nearest_near_work = _hand_in_locked_work_zone(nearest, target_center, spacing, config)
+            nearest_grid_distance = _hand_work_distance(nearest, target_center)
+            keep_radius = max(2.2 * spacing, float(config.get("locked_hand_keep_zone_spacing_factor", 3.2)) * spacing)
+            grid_margin = float(config.get("locked_hand_grid_switch_margin_spacing", 1.15)) * spacing
+            grid_confirm_frames = int(config.get("locked_hand_grid_switch_confirm_frames", confirm_frames))
+            grid_switch_candidate = (
+                closest_to_grid is not nearest
+                and closest_grid_distance + grid_margin < nearest_grid_distance
+                and closest_grid_distance <= keep_radius
+                and nearest_grid_distance > keep_radius
+            )
+            if grid_switch_candidate:
+                if state.candidate_hand is not None and _hand_identity_distance(closest_to_grid, state.candidate_hand) <= max_jump:
+                    state.candidate_frames += 1
+                else:
+                    state.candidate_hand = closest_to_grid
+                    state.candidate_frames = 1
+                if state.candidate_frames >= grid_confirm_frames:
+                    return _select_hand(state, closest_to_grid, frame_index, "locked_grid_proximity_switch", "blizja_roka_ob_mrezi")
+                selected, state = _select_hand(
+                    state,
+                    nearest,
+                    frame_index,
+                    "locked_continuous_detection",
+                    "blizja_roka_se_potrjuje",
+                    clear_candidate=False,
+                )
+                return selected, state
+            state.candidate_hand = None
+            state.candidate_frames = 0
+            if nearest_near_work:
+                state.locked_away_start_frame = -10_000
+            elif state.locked_away_start_frame < 0:
+                state.locked_away_start_frame = frame_index
+            away_start_frame = state.locked_away_start_frame
+            away_frames = frame_index - state.locked_away_start_frame if state.locked_away_start_frame >= 0 else 0
+            if nearest_near_work or away_frames < reselect_frames or not closest_near_work or nearest is best:
+                selected, state = _select_hand(state, nearest, frame_index, "locked_continuous_detection", "zaklenjena_roka")
+                if not nearest_near_work:
+                    state.locked_away_start_frame = away_start_frame
+                return selected, state
+            return _select_hand(state, closest_to_grid, frame_index, "reselected_after_locked_away_timeout", "zaklenjena_roka_predolgo_stran")
 
-    best_jump = float(np.linalg.norm(best.palm_center - previous.palm_center))
+        lost_frames = frame_index - state.last_good_frame
+        if lost_frames < reselect_frames or not closest_near_work:
+            return _hold_locked_previous(state, frame_index, fps, config, "zaklenjena_roka_preprecuje_preklop")
+        return _select_hand(state, closest_to_grid, frame_index, "reselected_after_locked_timeout", "prejsnja_roka_predolgo_izgubljena")
+
+    if previous_visible and (best_is_previous or hands_overlap or best.score < nearest_score + switch_margin):
+        return _select_hand(state, nearest, frame_index, "continuous_detection", "ohranjena_kontinuiteta")
+
+    best_jump = _hand_identity_distance(best, previous)
     best_near_target = float(np.linalg.norm(best.pinch_center - target_center)) <= 5.0 * spacing
     switch_candidate = best.score >= previous_score_estimate + switch_margin and best_jump <= max_jump * 2.2 and best_near_target
     if switch_candidate:
@@ -248,27 +342,11 @@ def select_patient_hand(
             state.candidate_hand = best
             state.candidate_frames = 1
         if state.candidate_frames >= confirm_frames:
-            state.selected_hand = best
-            state.last_good_hand = best
-            state.last_good_frame = frame_index
-            state.last_frame_index = frame_index
-            state.confidence = best.score
-            state.selected_hand_source = "confirmed_switch"
-            state.rejected_switch_reason = ""
-            state.candidate_hand = None
-            state.candidate_frames = 0
-            return best, state
+            return _select_hand(state, best, frame_index, "confirmed_switch")
         return _hold_previous(state, frame_index, fps, config, "preklop_se_ni_potrjen")
 
     if frame_index - state.last_good_frame > int(round(config["hand_hold_seconds"] * max(fps, 1.0))):
-        state.selected_hand = best
-        state.last_good_hand = best
-        state.last_good_frame = frame_index
-        state.last_frame_index = frame_index
-        state.confidence = best.score
-        state.selected_hand_source = "reselected_after_timeout"
-        state.rejected_switch_reason = "prejsnja_roka_predolgo_izgubljena"
-        return best, state
+        return _select_hand(state, best, frame_index, "reselected_after_timeout", "prejsnja_roka_predolgo_izgubljena")
 
     return _hold_previous(state, frame_index, fps, config, "nova_roka_ni_dovolj_boljsa")
 

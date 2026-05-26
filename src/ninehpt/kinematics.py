@@ -1,4 +1,4 @@
-"""Kinematic measurements for the selected hand."""
+# Kinematične meritve za izbrano roko.
 
 from __future__ import annotations
 
@@ -71,7 +71,11 @@ class KinematicsTracker:
 
     @staticmethod
     def _row(state: _PointState, valid: bool) -> dict[str, float]:
+        x_m = float(state.position_m[0]) if state.position_m is not None else 0.0
+        y_m = float(state.position_m[1]) if state.position_m is not None else 0.0
         return {
+            "x_m": x_m,
+            "y_m": y_m,
             "path_m": state.path_m,
             "velocity_mps": state.velocity_mps if valid else 0.0,
             "acceleration_mps2": state.acceleration_mps2 if valid else 0.0,

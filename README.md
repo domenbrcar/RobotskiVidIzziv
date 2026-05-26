@@ -1,6 +1,6 @@
 # Robotski vid: analiza 9HPT videoposnetkov
 
-Projekt obdela videoposnetke testa Nine Hole Peg Test (9HPT). Pipeline zaklene ciljno 3x3 mrežo, stabilizira izbrano pacientovo roko, izračuna kinematiko roke, palca in kazalca ter shrani slovenski GUI video in CSV izhode.
+Projekt obdela videoposnetke testa Nine Hole Peg Test. Program samodejno izbere ciljno mrežo, sledi roki, zazna zatiče in shrani pregledni GUI video, grafe ter trajektorije.
 
 ## Docker build
 
@@ -55,37 +55,16 @@ docker run --rm -it \
   -output /workspace/output/final
 ```
 
-Predstavniški pregled po pacientih:
+## Izhod
 
-```bash
-docker run --rm -it \
-  --shm-size=16g \
-  -v "$(pwd):/workspace" \
-  -w /workspace \
-  rv-9hpt python src/run.py \
-  -folder /workspace/data \
-  -output /workspace/output/representative \
-  --one-per-patient
-```
-
-## Izhodne datoteke
-
-Za vsak video nastane mapa:
+Za vsak video nastane samo:
 
 ```text
 output/<run_name>/patient_XXX/<video_id>/
-  gui_<video_id>.mp4
-  gui_kinematics_<video_id>.csv
-  gui_pin_states_<video_id>.csv
-  gui_pin_events_<video_id>.csv
-  gui_summary_<video_id>.csv
-  gui_calibration_debug_<video_id>.json
+  gui_video/
+    gui_<video_id>.mp4
+  graphs/
+    *.png
+  trajectories/
+    *.png
 ```
-
-Skupni pregled zagona je v:
-
-```text
-output/<run_name>/processing_report.csv
-```
-
-Število zatičev je trenutno število vizualno potrjenih zasedenih ROI v zaklenjeni ciljni mreži. Merilo gibanja je izračunano iz znanega razmika 32 mm med sosednjimi luknjami.

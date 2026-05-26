@@ -1,11 +1,11 @@
-"""Visual peg occupancy state machine for the locked 9HPT grid."""
+# Vizualni avtomat stanj zasedenosti zatičev za zaklenjeno 9HPT mrežo.
 
 from __future__ import annotations
 
 import cv2
 import numpy as np
 
-from .config import EMPTY, OCCLUDED, OCCUPIED
+from .config import EMPTY, OCCUPIED
 from .grid_detection import compute_grid_spacing_px
 from .models import DetectedHand, PinEvent, RoiBaseline, RoiRuntimeState
 
@@ -216,6 +216,8 @@ class PegOccupancyTracker:
         self._previous_brightness: list[float | None] = [None] * 9
         self._previous_scores: list[float] = [0.0] * 9
         self._global_light_frames = 0
+        # Zadnje potrjene vstavitve s signalom, da lahko zavrnemo nerealne skoke štetja.
+        self._accepted_insert_events: list[tuple[int, float]] = []
         self._grid_box = self._build_grid_box()
 
     def _build_grid_box(self) -> tuple[int, int, int, int]:
@@ -254,6 +256,80 @@ class PegOccupancyTracker:
             hand_recently_left=state.hand_recently_left,
             source=source,
         ))
+
+    def _can_accept_insert(self, frame_index: int, insert_score: float) -> tuple[bool, str]:
+        min_score = float(self.config.get("confirmed_insert_min_score", 0.0))
+        if insert_score < min_score:
+            return False, "sibek_vizualni_signal_zatica"
+
+        window_frames = max(1, int(round(float(self.config["peg_count_jump_window_seconds"]) * self.fps)))
+        max_increase = max(1, int(self.config["max_peg_count_increase_per_window"]))
+        cutoff = frame_index - window_frames
+        self._accepted_insert_events = [
+            (frame, score)
+            for frame, score in self._accepted_insert_events
+            if frame > cutoff
+        ]
+
+        pair_window_frames = max(1, int(round(float(self.config.get("fast_pair_window_seconds", 0.0)) * self.fps)))
+        pair_min_score = float(self.config.get("fast_pair_min_score", min_score))
+        recent_pair_events = [
+            (frame, score)
+            for frame, score in self._accepted_insert_events
+            if frame_index - frame <= pair_window_frames
+        ]
+        weak_fast_pair = any(
+            insert_score < pair_min_score or previous_score < pair_min_score
+            for _, previous_score in recent_pair_events
+        )
+        if weak_fast_pair:
+            return False, "prehitra_sibka_dvojna_potrditev"
+
+        if len(self._accepted_insert_events) >= max_increase:
+            return False, "prehitro_skupinsko_stetje"
+        return True, ""
+
+    def _register_insert(self, frame_index: int, insert_score: float) -> None:
+        self._accepted_insert_events.append((frame_index, float(insert_score)))
+
+    def _detail_looks_occupied(self, detail: dict[str, float | np.ndarray], baseline: RoiBaseline, state: RoiRuntimeState, recently_left_grid: bool) -> bool:
+        occupied_thr = max(baseline.occupied_threshold, self.config["min_occupied_threshold"])
+        baseline_changed = float(detail["change_from_baseline"]) >= max(occupied_thr * 0.52, self.config["pre_visit_change_threshold"])
+        pre_changed = float(detail["change_from_pre_entry"]) >= max(self.config["pre_visit_change_threshold"], occupied_thr * 0.36) or not recently_left_grid
+        object_like = float(detail["center_disappearance"]) >= 0.030 and (
+            float(detail["dark_object_score"]) >= 0.12
+            or float(detail["blue_score"]) >= 0.05
+            or float(detail["center_disappearance"]) >= 0.18
+        )
+        strong_score = float(detail["post_insert_score"]) >= occupied_thr
+        stable_score = (
+            float(detail["post_insert_score"]) >= self.config["stable_visual_min_score"]
+            and float(detail["change_from_baseline"]) >= self.config["stable_visual_min_baseline_change"]
+        )
+        return bool((strong_score and baseline_changed and pre_changed and object_like) or (stable_score and object_like))
+
+    def _reset_group_reference(self, candidate_indices: list[int], details: list[dict[str, float | np.ndarray]], frame_index: int) -> None:
+        for idx in candidate_indices:
+            state = self.states[idx]
+            patch = details[idx]["patch"]
+            if isinstance(patch, np.ndarray):
+                self.baselines[idx] = _build_baseline_from_patch(patch, [0.0], self.config)
+            state.change_score_ema = 0.0
+            state.post_insert_score_ema = 0.0
+            state.change_from_baseline = 0.0
+            state.change_from_pre_entry = 0.0
+            state.center_disappearance = 0.0
+            state.dark_score = 0.0
+            state.blue_score = 0.0
+            state.occupied_frames = 0
+            state.empty_frames = 0
+            state.display_state = state.confirmed_state
+            state.pre_visit_snapshot = None
+            state.pre_entry_change_score = 0.0
+            state.last_state_change_frame = frame_index
+            state.rejected_reason = "osvezena_referenca_skupinska_sprememba"
+            self._previous_brightness[idx] = None
+            self._previous_scores[idx] = 0.0
 
     def _global_light_event(self, details: list[dict[str, float | np.ndarray]]) -> bool:
         changed_scores = 0
@@ -305,6 +381,20 @@ class PegOccupancyTracker:
         wait_after_exit = int(round(self.config["post_hand_exit_wait_seconds"] * self.fps))
         recently_left_grid = 0 <= frame_index - self._grid_exit_frame <= int(round(self.config["grid_interaction_recent_seconds"] * self.fps))
         freeze_updates = hand_in_grid or global_light or frame_index - self._grid_exit_frame < wait_after_exit
+        empty_candidate_indices = [
+            idx
+            for idx, (state, detail, baseline) in enumerate(zip(self.states, details, self.baselines))
+            if state.confirmed_state != OCCUPIED and self._detail_looks_occupied(detail, baseline, state, recently_left_grid)
+        ]
+        enough_empty_slots = sum(1 for state in self.states if state.confirmed_state != OCCUPIED) >= int(self.config["reference_reset_min_empty_slots"])
+        if (
+            not hand_in_grid
+            and not recently_left_grid
+            and enough_empty_slots
+            and len(empty_candidate_indices) >= int(self.config["reference_reset_candidate_count"])
+        ):
+            self._reset_group_reference(empty_candidate_indices, details, frame_index)
+            return self._result(hand_in_grid, global_light, -1, "osvezena_referenca_skupinska_sprememba", details)
 
         alpha = float(self.config["change_ema_alpha"])
         occupied_confirm_frames = max(1, int(round(self.config["occupied_confirm_seconds"] * self.fps)))
@@ -329,7 +419,7 @@ class PegOccupancyTracker:
             if state.hand_inside:
                 active_roi = idx
             if freeze_updates:
-                state.display_state = OCCLUDED if state.hand_inside else state.confirmed_state
+                state.display_state = state.confirmed_state
                 state.occupied_frames = 0
                 state.empty_frames = 0
                 state.rejected_reason = "zamrznjeno_roka" if hand_in_grid else "zamrznjeno_svetloba"
@@ -370,12 +460,18 @@ class PegOccupancyTracker:
                     state.rejected_reason = "ni_lokalnega_objekta"
                 needed = occupied_confirm_frames if state.hand_recently_left else visual_occupied_frames
                 if state.occupied_frames >= needed and frames_since_change >= min_hold_frames:
+                    can_insert, rejection_reason = self._can_accept_insert(frame_index, state.post_insert_score_ema)
+                    if not can_insert:
+                        state.display_state = state.confirmed_state
+                        state.rejected_reason = rejection_reason
+                        continue
                     previous = state.confirmed_state
                     state.confirmed_state = OCCUPIED
                     state.display_state = OCCUPIED
                     state.empty_frames = 0
                     state.last_state_change_frame = frame_index
                     state.confidence = float(np.clip(state.post_insert_score_ema / max(occupied_thr, 1e-6), 0.0, 1.0))
+                    self._register_insert(frame_index, state.post_insert_score_ema)
                     self._add_event(idx, frame_index, time_s, previous, OCCUPIED, state, "visual_roi_state")
                 else:
                     state.display_state = state.confirmed_state

@@ -1,4 +1,4 @@
-"""Candidate 3x3 grid detection for 9HPT calibration."""
+# Zaznava kandidatnih 3x3 mrež za kalibracijo 9HPT.
 
 from __future__ import annotations
 

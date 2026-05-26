@@ -1,4 +1,4 @@
-"""Target grid calibration and light-sequence reasoning."""
+# Kalibracija ciljne mreže in sklepanje iz zaporedja osvetlitev.
 
 from __future__ import annotations
 
@@ -289,6 +289,10 @@ def calibrate_target_grid_from_light_sequence(
             "detections": track.detections,
             "confidence": round(track.confidence, 4),
             "spacing_px": round(track.spacing_px, 2),
+            "first_frame": int(track.first_frame),
+            "last_frame": int(track.last_frame),
+            "center": [round(float(value), 3) for value in track.center],
+            "centers": [[round(float(x), 3), round(float(y), 3)] for x, y in np.asarray(track.centers, dtype=np.float32).reshape(-1, 2)],
             "local_change_score": round(track.local_change_score, 4),
             "max_occupied_like_count": track.max_occupied_like_count,
             "mean_light_score": round(float(np.mean([score for _, _, score in track.light_scores])) if track.light_scores else 0.0, 4),

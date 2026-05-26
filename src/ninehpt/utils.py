@@ -1,12 +1,10 @@
-"""Utility helpers for filenames, CSV rows, and filesystem paths."""
+# Pomožne funkcije za imena datotek in poti v datotečnem sistemu.
 
 from __future__ import annotations
 
-import csv
 import os
 import re
 from pathlib import Path
-from typing import Iterable
 
 from .models import VideoMetadata
 
@@ -44,15 +42,6 @@ def ensure_dir(path: str | os.PathLike[str]) -> Path:
     out = Path(path)
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-def write_csv(path: str | os.PathLike[str], fieldnames: list[str], rows: Iterable[dict]) -> None:
-    ensure_dir(Path(path).parent)
-    with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
 def find_video_files(root: str | os.PathLike[str]) -> list[str]:
